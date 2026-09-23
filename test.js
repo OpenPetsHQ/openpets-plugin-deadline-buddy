@@ -6,6 +6,7 @@ import {
   CALENDAR_SYNC_SCHEDULE_ID,
   DAY_MS,
   DEFAULT_REMINDER_OFFSETS,
+  HUD_REFRESH_SCHEDULE_ID,
   MAX_ALERT_ATTEMPTS,
   MINUTE_MS,
   REMINDER_SCHEDULE_ID,
@@ -18,7 +19,7 @@ import {
   normalizeState,
   planReminders,
   reminderOffsets,
-} from "./core.js";
+} from "./index.js";
 import { deliverDue, register, synchronizeTrackedEvents } from "./index.js";
 
 let createTestHarness;
@@ -105,6 +106,9 @@ assert.equal(normalizeCalendarEvent({ ...allDay, status: "cancelled" }), null);
   const h = makeHarness({ reminderOffsets: ["0"] });
   await h.start();
   assert.equal([...h.calls.commands.values()].every((item) => item.meta.placement === "submenu"), true);
+  assert.equal(h.calls.schedules.get(HUD_REFRESH_SCHEDULE_ID)?.type, "once", "the one-minute HUD refresh uses a one-shot SDK schedule");
+  await h.clock.advance("1m");
+  assert.equal(h.calls.schedules.get(HUD_REFRESH_SCHEDULE_ID)?.type, "once", "the HUD refresh rearms after each tick");
   const first = await addDeadline(h, "Design review");
   assert.equal(first.manual.length, 1);
   assert.equal(first.manual[0].title, "Design review");
