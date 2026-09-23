@@ -42,10 +42,18 @@ it does not provide cross-device recovery. The Composio API key and HMAC secret
 exist only as server-side Worker secrets. Calendar Airmail's existing OAuth
 flow and plugin-scoped credentials are not used or modified.
 
-Composio's optional callback identity verifier is not enabled by this broker.
-Because a local profile has no browser sign-in identity, maintainers must
-approve a host-mediated profile handoff before public rollout. Until then,
-keep authorization links private to the local machine and do not share them.
+The broker uses Composio's deferred-auth callback with a host-mediated,
+single-use profile handoff. The callback URI is encrypted in the Worker-only
+D1 store; the broker returns a short-lived one-time ticket through the
+`openpets://calendar/verify` protocol. The desktop host redeems it with its
+OS-encrypted local-profile identity. The Worker calls Composio `complete_auth`
+with the attempt-specific owner and checks the exact account ID, owner,
+toolkit, auth config, private ownership, and ACTIVE status before recording
+the connection as verified. A browser return or ACTIVE status alone is never
+accepted. A single project-wide connection slot prevents callback mix-ups,
+and the connection flow fails closed until the verifier, D1 store, secrets,
+rate limits, and log redaction are configured. No live broker or OAuth setup
+has been tested in this repository.
 
 The backend allowlists Google and Microsoft calendar reads, returns a minimized
 event shape, and checks the provider, toolkit, auth configuration, and private
@@ -60,6 +68,11 @@ released desktop app cannot use this manifest permission until that host change
 is released. The broker must be deployed at the first-party HTTPS origin
 configured by the host. Its domain, Cloudflare account, and production status
 must be confirmed by OpenPets maintainers before users can connect accounts.
+Use a dedicated Composio project and set its project-wide callback to
+`https://calendar-broker.openpets.dev/v1/calendar/connect/callback`. The
+current broker origin and D1 database ID are placeholders; do not enable
+connection verification or deploy until maintainers provision the real route,
+database, read-only auth configs, and rate-limit namespaces.
 
 The Worker requires these server-side secrets/variables:
 
@@ -67,8 +80,17 @@ The Worker requires these server-side secrets/variables:
   connected-account operations used by this service.
 - `COMPOSIO_IDENTITY_HMAC_KEY` — at least 32 random bytes, used to derive an
   opaque Composio user ID from the local-profile bearer.
+- `COMPOSIO_CALLBACK_ENCRYPTION_KEY` — 32 random bytes encoded as unpadded
+  base64url, used to encrypt the deferred callback URI in D1.
 - `COMPOSIO_GOOGLE_AUTH_CONFIG_ID` and `COMPOSIO_OUTLOOK_AUTH_CONFIG_ID` —
   managed auth configs set up with the read-only scopes below.
+- `COMPOSIO_CALLBACK_VERIFIER_ENABLED=1` — enable only after the callback route,
+  D1 migration, secrets, rate limits, and query-string redaction are verified.
+
+In the OpenPets host repository, apply
+`apps/calendar-broker/migrations/0001_calendar_connect_attempts.sql` before
+enabling the verifier. Redact `session_uri` from Worker, CDN, proxy, and error
+logs; the callback necessarily carries it in the request query.
 
 Do not put these values in this repository, the plugin manifest, the desktop
 bundle, plugin logs, or user-accessible storage. Set up Composio spending
