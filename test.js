@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 
 import {
   ALLOWED_REMINDER_OFFSETS,
-  CALENDAR_SYNC_SCHEDULE_ID,
   DAY_MS,
   DEFAULT_REMINDER_OFFSETS,
   HUD_REFRESH_SCHEDULE_ID,
@@ -16,64 +15,21 @@ import {
   formatRemaining,
   localDateTimeToEpoch,
   makeReminderKey,
-  normalizeCalendarEvent,
   normalizeState,
   planReminders,
   reminderOffsets,
 } from "./index.js";
-import { deliverDue, register, synchronizeTrackedEvents } from "./index.js";
+import { deliverDue, register } from "./index.js";
 
 const { createTestHarness } = await import("@open-pets/plugin-sdk/testing");
 
 const locales = { en: JSON.parse(await readFile(new URL("./locales/en.json", import.meta.url), "utf8")) };
-const permissions = ["pet:speak", "pet:interact", "pet:pin", "commands", "schedule", "storage", "status", "calendar:connect", "events", "audio", "notify"];
+const permissions = ["pet:speak", "pet:interact", "pet:pin", "commands", "schedule", "storage", "status", "audio", "notify"];
+const manifest = JSON.parse(await readFile(new URL("./openpets.plugin.json", import.meta.url), "utf8"));
 const now = Date.now();
 
 function makeHarness(config = {}) {
   return createTestHarness(register, { permissions, locales, config: { reminderOffsets: ["60", "15", "0"], ...config }, nowMs: now });
-}
-
-function attachCalendarMock(h) {
-  const statuses = new Map();
-  const calendars = new Map();
-  const eventLists = new Map();
-  const events = new Map();
-  const eventKey = (provider, calendarId, eventId) => `${provider}\0${calendarId}\0${eventId}`;
-  h.calls.calendarCalls = [];
-  const record = (call) => h.calls.calendarCalls.push(call);
-  const mock = {
-    mockStatus(provider, status) { statuses.set(provider, status); },
-    mockCalendars(provider, value) { calendars.set(provider, value); },
-    mockEvents(provider, calendarId, value) { eventLists.set(`${provider}\0${calendarId}`, value); },
-    mockEvent(provider, calendarId, eventId, value) { events.set(eventKey(provider, calendarId, eventId), value); },
-    async status(provider) {
-      record({ operation: "status", provider });
-      return statuses.get(provider) ?? { state: "not_connected" };
-    },
-    async listCalendars(provider) {
-      record({ operation: "listCalendars", provider });
-      return calendars.get(provider) ?? { calendars: [], truncated: false };
-    },
-    async listEvents(provider, calendarId, range) {
-      record({ operation: "listEvents", provider, calendarId, range });
-      return eventLists.get(`${provider}\0${calendarId}`) ?? { events: [], truncated: false };
-    },
-    async getEvent(provider, calendarId, eventId, calendarTimeZone) {
-      record({ operation: "getEvent", provider, calendarId, eventId, calendarTimeZone });
-      return events.get(eventKey(provider, calendarId, eventId)) ?? null;
-    },
-    async connect(provider) {
-      record({ operation: "connect", provider });
-      return { state: "cancelled" };
-    },
-    async disconnect(provider) {
-      record({ operation: "disconnect", provider });
-      return { state: "disconnected" };
-    },
-  };
-  h.ctx.calendar = mock;
-  h.calendar = mock;
-  return mock;
 }
 
 function futureForm(minutesAhead = 20) {
@@ -94,10 +50,6 @@ function futureForm(minutesAhead = 20) {
 async function addDeadline(h, title, minutesAhead = 20) {
   await h.runCommand("add-deadline", { title, ...futureForm(minutesAhead) });
   return h.calls.storage.get("deadline-buddy-state");
-}
-
-function connectedStatus(provider) {
-  return { provider, state: "connected", checkedAt: new Date().toISOString() };
 }
 
 // The boundary helpers keep absolute time, reject invalid wall times, and use
@@ -121,13 +73,11 @@ assert.equal(formatRemaining(now - 61 * MINUTE_MS, now), "2h ago");
   assert.equal(compactHudRelative(h.ctx, now + 2 * DAY_MS, now), "in 2d");
 }
 
-const allDay = normalizeCalendarEvent({
-  id: "all-day-1", calendarId: "work", title: "Conference", status: "confirmed", allDay: true,
-  startDate: "2026-10-25", endDateExclusive: "2026-10-26", dueAt: "2026-10-25T23:59:59.999Z", timeZone: "Europe/London",
-});
-assert.equal(allDay?.allDay, true);
-assert.equal(allDay?.dueAt, "2026-10-25T23:59:59.999Z", "provider-normalized all-day deadline stays an absolute instant");
-assert.equal(normalizeCalendarEvent({ ...allDay, status: "cancelled" }), null);
+assert.equal(manifest.permissions.includes("calendar:connect"), false);
+assert.equal(manifest.permissions.includes("events"), false);
+assert.equal(manifest.permissions.includes("auth"), false);
+assert.equal(manifest.permissions.includes("network"), false);
+assert.equal(manifest.network, undefined);
 
 // Reminder plans are stable across restarts, reset only when a deadline moves,
 // and retain just the nearest missed offset after a long sleep.
@@ -147,11 +97,11 @@ assert.equal(normalizeCalendarEvent({ ...allDay, status: "cancelled" }), null);
 }
 
 // Manual create/update/delete, pinned nearest-deadline HUD, and submenu-only
-// placement for every plugin action.
+// placement for every plugin action without a calendar host capability.
 {
   const h = makeHarness({ reminderOffsets: ["0"] });
   await h.start();
-  assert.equal(h.ctx.calendar, undefined, "manual deadline features do not require the optional calendar host capability");
+  assert.equal([...h.calls.commands.keys()].some((id) => /calendar|connect-google|outlook/i.test(id)), false);
   assert.equal([...h.calls.commands.values()].every((item) => item.meta.placement === "submenu"), true);
   assert.equal(h.calls.schedules.get(HUD_REFRESH_SCHEDULE_ID)?.type, "once", "the one-minute HUD refresh uses a one-shot SDK schedule");
   await h.clock.advance("1m");
@@ -276,102 +226,43 @@ assert.equal(normalizeCalendarEvent({ ...allDay, status: "cancelled" }), null);
   await h.stop();
 }
 
-// Calendar integration is selective, provider-mocked, reconciles edits and
-// cancellation, and preserves the cached event through offline failures.
+// Old calendar snapshots and reminders are discarded without losing manual
+// deadlines when users upgrade from the connector-based preview.
 {
   const h = makeHarness({ reminderOffsets: ["0"] });
-  await h.start();
-  const calendar = attachCalendarMock(h);
-  calendar.mockStatus("google", connectedStatus("google"));
-  calendar.mockCalendars("google", { calendars: [{ id: "work", name: "Work", timeZone: "Europe/London", primary: true }], truncated: false });
-  await h.runCommand("refresh-calendars");
-  const browseId = [...h.calls.commands.keys()].find((id) => id.startsWith("browse-calendar-google-"));
-  assert.ok(browseId, "connected calendars become commands inside the plugin submenu");
-  const event = {
-    id: "event-1", calendarId: "work", title: "Planning", status: "confirmed", allDay: false,
-    startAt: new Date(Date.now() + 45 * 60_000).toISOString(), endAt: new Date(Date.now() + 60 * 60_000).toISOString(), timeZone: "Europe/London",
+  const dueAt = now + 30 * MINUTE_MS;
+  const calendarReminder = {
+    key: makeReminderKey("event:google:planning", dueAt, 0),
+    sourceKey: "event:google:planning",
+    sourceKind: "calendar",
+    sourceId: "planning",
+    dueAt,
+    offsetMinutes: 0,
+    state: "pending",
+    attempts: 0,
+    snoozeCount: 0,
   };
-  calendar.mockEvents("google", "work", { events: [event], truncated: false });
-  await h.runCommand(browseId);
-  const eventListCall = h.calls.calendarCalls.find((call) => call.operation === "listEvents");
-  assert.equal(eventListCall?.range?.calendarTimeZone, "Europe/London", "calendar timezone accompanies event-list reads for all-day resolution");
-  const trackId = [...h.calls.commands.keys()].find((id) => id.startsWith("track-events-google-"));
-  assert.ok(trackId);
-  assert.equal(h.calls.commands.get(trackId).meta.placement, "submenu");
-  await h.runCommand(trackId, { eventIndex: "0" });
-  assert.equal(h.calls.storage.get("deadline-buddy-state").events.length, 1);
-  assert.equal(h.calls.storage.get("deadline-buddy-state").events[0].calendarTimeZone, "Europe/London");
-
-  const moved = { ...event, title: "Planning moved", startAt: new Date(Date.now() + 2 * 60 * 60_000).toISOString(), endAt: new Date(Date.now() + 3 * 60 * 60_000).toISOString() };
-  calendar.mockEvent("google", "work", "event-1", moved);
-  await h.runCommand("sync-calendar-events");
-  const eventReadCall = h.calls.calendarCalls.find((call) => call.operation === "getEvent");
-  assert.equal(eventReadCall?.calendarTimeZone, "Europe/London", "restart reconciliation reuses the event's calendar timezone");
-  let saved = h.calls.storage.get("deadline-buddy-state");
-  assert.equal(saved.events[0].event.title, "Planning moved");
-  assert.equal(saved.events[0].event.startAt, moved.startAt);
-  assert.match(h.calls.bubbles.find((bubble) => bubble.pinned).spec.hud.items[0].label, /Planning moved/);
-
-  const originalGetEvent = h.ctx.calendar.getEvent;
-  h.ctx.calendar.getEvent = async () => { throw new Error("offline"); };
-  await synchronizeTrackedEvents(h.ctx);
-  saved = h.calls.storage.get("deadline-buddy-state");
-  assert.equal(saved.events.length, 1, "offline sync keeps the last known event snapshot");
-  assert.equal(saved.offline, true);
-  h.ctx.calendar.getEvent = originalGetEvent;
-  calendar.mockEvent("google", "work", "event-1", null);
-  await h.runCommand("sync-calendar-events");
-  saved = h.calls.storage.get("deadline-buddy-state");
-  assert.equal(saved.events.length, 0, "cancellation/deletion removes the event and its reminders");
-  assert.equal(h.calls.schedules.has(CALENDAR_SYNC_SCHEDULE_ID), false);
-  assert.ok(h.calls.speak.some((text) => text.includes("cancelled or removed")));
-  h.expectNoErrors();
-  await h.stop();
-}
-
-// Project-wide callback serialization has a clear user message rather than
-// claiming this profile already has a pending connection.
-{
-  const h = makeHarness();
+  await h.ctx.storage.set("deadline-buddy-state", {
+    version: 1,
+    sequence: 2,
+    manual: [{ id: "keep-me", title: "Manual task", dueAt: now + DAY_MS, createdAt: now }],
+    calendars: [{ provider: "google", id: "primary", name: "Calendar" }],
+    events: [{ provider: "google", calendarId: "primary", eventId: "planning", trackedAt: now, event: { id: "planning" } }],
+    reminders: [calendarReminder],
+    activeAlertKeys: [],
+    connectionStates: { google: "connected", outlook: "connected" },
+    offline: true,
+  });
   await h.start();
-  attachCalendarMock(h).connect = async () => ({ state: "busy" });
-  await h.runCommand("connect-google");
-  assert.ok(h.calls.speak.some((text) => text.includes("Another OpenPets calendar connection is being verified")));
-  h.expectNoErrors();
-  await h.stop();
-}
-
-{
-  const h = makeHarness();
-  await h.start();
-  attachCalendarMock(h).connect = async () => ({ state: "cancelled" });
-  await h.runCommand("connect-google");
-  assert.ok(h.calls.speak.some((text) => text.includes("The Google Calendar connection was cancelled")));
-  h.expectNoErrors();
-  await h.stop();
-}
-
-// Calendar auth/status failures do not mark local deadlines offline or alter
-// the manual reminder schedule; the UI points users to the host connection hub.
-{
-  const h = makeHarness({ reminderOffsets: ["0"] });
-  await h.start();
-  const calendar = attachCalendarMock(h);
-  calendar.connect = async () => { throw new Error("OAuth identity verification unavailable"); };
-  calendar.status = async () => { throw new Error("Calendar status is unavailable"); };
-
-  await h.runCommand("connect-google");
-  await h.runCommand("check-connections");
-  const state = h.calls.storage.get("deadline-buddy-state");
-  assert.equal(state.offline, false);
-  assert.equal(state.connectionStates.google, "unavailable");
-  assert.ok(h.calls.speak.some((text) => text.includes("Integrations → Connected Apps") && text.includes("Manual deadlines remain available")));
-
-  await addDeadline(h, "Manual deadline still works", 20);
-  const afterManualCreate = h.calls.storage.get("deadline-buddy-state");
-  assert.equal(afterManualCreate.offline, false);
-  assert.equal(afterManualCreate.manual.length, 1);
-  assert.equal(afterManualCreate.reminders.length, 1);
+  const saved = h.calls.storage.get("deadline-buddy-state");
+  assert.deepEqual(saved.manual.map((item) => item.id), ["keep-me"]);
+  assert.equal(Object.hasOwn(saved, "calendars"), false);
+  assert.equal(Object.hasOwn(saved, "events"), false);
+  assert.equal(Object.hasOwn(saved, "connectionStates"), false);
+  assert.equal(Object.hasOwn(saved, "offline"), false);
+  assert.equal(saved.reminders.some((item) => item.sourceKey.startsWith("event:")), false);
+  assert.ok(saved.reminders.some((item) => item.sourceKey === "manual:keep-me"));
+  assert.ok(h.calls.bubbles.some((bubble) => bubble.pinned && bubble.spec.hud.items[0].label.includes("Manual task")));
   h.expectNoErrors();
   await h.stop();
 }

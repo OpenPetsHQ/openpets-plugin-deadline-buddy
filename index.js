@@ -1,13 +1,11 @@
 export const STORAGE_KEY = "deadline-buddy-state";
 export const REMINDER_SCHEDULE_ID = "deadline-buddy-next-reminder";
 export const HUD_REFRESH_SCHEDULE_ID = "deadline-buddy-hud-refresh";
-export const CALENDAR_SYNC_SCHEDULE_ID = "deadline-buddy-calendar-sync";
 export const MINUTE_MS = 60_000;
 export const DAY_MS = 24 * 60 * MINUTE_MS;
 export const DEFAULT_REMINDER_OFFSETS = [60, 15, 0];
 export const ALLOWED_REMINDER_OFFSETS = [1440, 60, 15, 0];
 export const MAX_MANUAL_DEADLINES = 100;
-export const MAX_TRACKED_EVENTS = 20;
 export const MAX_ALERT_ATTEMPTS = 3;
 export const MAX_SNOOZES_PER_ALERT = 3;
 export const MAX_REMINDER_ROWS = 1_000;
@@ -81,10 +79,6 @@ export function formatRemaining(dueAt, now = Date.now()) {
   return `${Math.ceil(hours / 24)}d${overdue ? " ago" : ""}`;
 }
 
-export function validProvider(value) {
-  return value === "google" || value === "outlook";
-}
-
 export function normalizeState(value) {
   const source = isRecord(value) ? value : {};
   const manual = arrayOrEmpty(source.manual).flatMap((item) => {
@@ -92,15 +86,6 @@ export function normalizeState(value) {
     const title = cleanTitle(item.title);
     return title ? [{ id: item.id, title, dueAt: item.dueAt, createdAt: item.createdAt }] : [];
   }).slice(0, MAX_MANUAL_DEADLINES);
-  const calendars = arrayOrEmpty(source.calendars).flatMap((item) => {
-    if (!isRecord(item) || !validProvider(item.provider) || !validId(item.id) || typeof item.name !== "string") return [];
-    return [{ provider: item.provider, id: item.id, name: cleanTitle(item.name, "Calendar"), ...(validZone(item.timeZone) ? { timeZone: item.timeZone } : {}), ...(typeof item.primary === "boolean" ? { primary: item.primary } : {}) }];
-  }).slice(0, 600);
-  const events = arrayOrEmpty(source.events).flatMap((item) => {
-    if (!isRecord(item) || !validProvider(item.provider) || !validId(item.calendarId) || !validId(item.eventId) || !Number.isFinite(item.trackedAt)) return [];
-    const event = normalizeCalendarEvent(item.event, item.trackedAt);
-    return event ? [{ provider: item.provider, calendarId: item.calendarId, eventId: item.eventId, trackedAt: item.trackedAt, ...(validZone(item.calendarTimeZone) ? { calendarTimeZone: item.calendarTimeZone } : {}), event }] : [];
-  }).slice(0, MAX_TRACKED_EVENTS);
   const reminders = arrayOrEmpty(source.reminders).flatMap((item) => {
     if (!isRecord(item) || !validId(item.key) || !validId(item.sourceKey) || !Number.isFinite(item.dueAt) || !REMINDER_STATES.has(item.state)) return [];
     const attempts = boundedInteger(item.attempts, 0, MAX_ALERT_ATTEMPTS);
@@ -108,8 +93,6 @@ export function normalizeState(value) {
     return [{
       key: item.key,
       sourceKey: item.sourceKey,
-      sourceKind: item.sourceKind === "calendar" ? "calendar" : "manual",
-      sourceId: validId(item.sourceId) ? item.sourceId : item.sourceKey,
       dueAt: item.dueAt,
       offsetMinutes: Number.isInteger(item.offsetMinutes) ? item.offsetMinutes : 0,
       state: item.state,
@@ -122,26 +105,17 @@ export function normalizeState(value) {
   }).slice(-MAX_REMINDER_ROWS);
   const reminderKeys = new Set(reminders.filter((item) => item.state === "shown" || item.state === "uncertain" || item.state === "delivering").map((item) => item.key));
   const activeAlertKeys = arrayOrEmpty(source.activeAlertKeys).filter((key) => typeof key === "string" && reminderKeys.has(key)).slice(-MAX_REMINDER_ROWS);
-  const connectionStates = {};
-  for (const provider of ["google", "outlook"]) {
-    const status = isRecord(source.connectionStates) ? source.connectionStates[provider] : undefined;
-    connectionStates[provider] = ["not_connected", "pending", "connected", "reauth_required", "offline", "unavailable"].includes(status) ? status : "not_connected";
-  }
   return {
     version: 1,
     sequence: boundedInteger(source.sequence, 0, Number.MAX_SAFE_INTEGER),
     manual,
-    calendars,
-    events,
     reminders,
     activeAlertKeys,
-    connectionStates,
-    offline: source.offline === true,
   };
 }
 
 export function planReminders(state, now = Date.now(), offsets = DEFAULT_REMINDER_OFFSETS) {
-  const sources = deadlineSources(state).filter((source) => source.kind !== "calendar" || source.endAt > now);
+  const sources = deadlineSources(state);
   const existing = new Map(state.reminders.map((item) => [item.key, item]));
   const expected = [];
   for (const source of sources) {
@@ -150,8 +124,6 @@ export function planReminders(state, now = Date.now(), offsets = DEFAULT_REMINDE
     const candidates = sourceOffsets.map((offsetMinutes) => ({
       key: makeReminderKey(source.key, source.dueAt, offsetMinutes),
       sourceKey: source.key,
-      sourceKind: source.kind,
-      sourceId: source.id,
       dueAt: source.dueAt - offsetMinutes * MINUTE_MS,
       offsetMinutes,
     }));
@@ -176,49 +148,13 @@ export function planReminders(state, now = Date.now(), offsets = DEFAULT_REMINDE
 }
 
 export function deadlineSources(state) {
-  const manual = state.manual.map((item) => ({
-    kind: "manual",
+  return state.manual.map((item) => ({
     id: item.id,
     key: `manual:${item.id}`,
     title: item.title,
     dueAt: item.dueAt,
-    endAt: item.dueAt,
     createdAt: item.createdAt,
   }));
-  const calendar = state.events.map((item) => {
-    const event = item.event;
-    const stableKey = `event:${item.provider}:${hash(`${item.calendarId}\u0000${item.eventId}`, 0x811c9dc5)}`;
-    return {
-      kind: "calendar",
-      id: stableKey,
-      key: stableKey,
-      title: event.title,
-      dueAt: Date.parse(event.allDay ? event.dueAt : event.startAt),
-      endAt: Date.parse(event.allDay ? event.dueAt : event.endAt),
-      createdAt: item.trackedAt,
-    };
-  });
-  return [...manual, ...calendar].filter((item) => Number.isFinite(item.dueAt) && Number.isFinite(item.endAt));
-}
-
-export function normalizeCalendarEvent(value, trackedAt = Date.now()) {
-  if (!isRecord(value) || !validId(value.id) || !validId(value.calendarId) || value.status !== "confirmed") return null;
-  const title = cleanTitle(value.title, "Untitled event");
-  const base = {
-    id: value.id,
-    calendarId: value.calendarId,
-    title,
-    status: "confirmed",
-    trackedAt,
-    ...(validZone(value.timeZone) ? { timeZone: value.timeZone } : {}),
-    ...(validIso(value.updatedAt) ? { updatedAt: value.updatedAt } : {}),
-  };
-  if (value.allDay === true) {
-    if (!validDate(value.startDate) || !validDate(value.endDateExclusive) || !validIso(value.dueAt)) return null;
-    return { ...base, allDay: true, startDate: value.startDate, endDateExclusive: value.endDateExclusive, dueAt: value.dueAt };
-  }
-  if (value.allDay !== false || !validIso(value.startAt) || !validIso(value.endAt) || Date.parse(value.endAt) < Date.parse(value.startAt)) return null;
-  return { ...base, allDay: false, startAt: value.startAt, endAt: value.endAt };
 }
 
 export function makeReminderKey(sourceKey, dueAt, offsetMinutes) {
@@ -240,29 +176,22 @@ export function localTimeZone() {
 }
 
 function validId(value) { return typeof value === "string" && value.length > 0 && value.length <= 512 && !/[\0-\x1f\x7f]/.test(value); }
-function validZone(value) { if (typeof value !== "string" || value.length > 100) return false; try { new Intl.DateTimeFormat("en", { timeZone: value }); return true; } catch { return false; } }
-function validIso(value) { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) && Number.isFinite(Date.parse(value)); }
-function validDate(value) { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(`${value}T00:00:00Z`)); }
 function arrayOrEmpty(value) { return Array.isArray(value) ? value : []; }
 function isRecord(value) { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function boundedInteger(value, min, max) { return Number.isInteger(value) ? Math.max(min, Math.min(max, value)) : 0; }
 function hash(value, seed) { let result = seed >>> 0; for (let index = 0; index < value.length; index += 1) { result ^= value.charCodeAt(index); result = Math.imul(result, 0x01000193) >>> 0; } return result.toString(36); }
 
 
-const CALENDARS_RANGE_DAYS = 90;
-const CALENDAR_SYNC_INTERVAL_MS = 30 * MINUTE_MS;
 const HUD_REFRESH_INTERVAL_MS = MINUTE_MS;
-const MAX_EVENT_CHOICES = 50;
 const MAX_ALERT_TEXT_ITEMS = 4;
 const RETRY_DELAYS_MS = [MINUTE_MS, 5 * MINUTE_MS];
-const PROVIDERS = ["google", "outlook"];
 const activeContexts = new Set();
 const runtimeByContext = new WeakMap();
 
 function runtimeFor(ctx) {
   let runtime = runtimeByContext.get(ctx);
   if (!runtime) {
-    runtime = { queue: Promise.resolve(), commands: new Set(), subscriptions: [], hud: null, alerts: new Set(), selections: new Map() };
+    runtime = { queue: Promise.resolve(), commands: new Set(), subscriptions: [], hud: null, alerts: new Set() };
     runtimeByContext.set(ctx, runtime);
   }
   return runtime;
@@ -281,14 +210,6 @@ async function readState(ctx) {
 
 async function writeState(ctx, state) {
   await ctx.storage.set(STORAGE_KEY, state);
-}
-
-function eventDueAt(event) {
-  return Date.parse(event.allDay ? event.dueAt : event.startAt);
-}
-
-function eventEndAt(event) {
-  return Date.parse(event.allDay ? event.dueAt : event.endAt);
 }
 
 function formatLocal(ctx, timestamp) {
@@ -327,12 +248,11 @@ function humanDeadlineSummary(ctx, state, now = Date.now()) {
   if (!sources.length) return ctx.t("status.none");
   const next = sources[0];
   const relative = relativeDeadline(ctx, next.dueAt, now);
-  return ctx.t(state.offline ? "status.offlineNext" : "status.next", { title: shortTitle(next.title, 55), relative });
+  return ctx.t("status.next", { title: shortTitle(next.title, 55), relative });
 }
 
-function nearestDeadline(state, now = Date.now()) {
+function nearestDeadline(state) {
   return deadlineSources(state)
-    .filter((item) => item.kind === "manual" || item.endAt > now)
     .sort((left, right) => left.dueAt - right.dueAt)[0] ?? null;
 }
 
@@ -354,7 +274,7 @@ export function compactHudRelative(ctx, dueAt, now) {
 
 async function renderHud(ctx, state = undefined, now = Date.now()) {
   const current = state ?? await readState(ctx);
-  const next = nearestDeadline(current, now);
+  const next = nearestDeadline(current);
   const runtime = runtimeFor(ctx);
   if (!next) {
     if (runtime.hud) {
@@ -366,11 +286,11 @@ async function renderHud(ctx, state = undefined, now = Date.now()) {
   }
   const relative = compactHudRelative(ctx, next.dueAt, now);
   const spec = {
-    tone: current.offline ? "warning" : "info",
+    tone: "info",
     pin: true,
     sticky: true,
     priority: "low",
-    hud: { items: [{ icon: "timer", value: hudProgress(next, now), label: ctx.t("hud.next", { title: shortTitle(next.title, 30), relative }), tone: current.offline ? "amber" : "blue" }] },
+    hud: { items: [{ icon: "timer", value: hudProgress(next, now), label: ctx.t("hud.next", { title: shortTitle(next.title, 30), relative }), tone: "blue" }] },
   };
   if (runtime.hud) {
     try { await runtime.hud.update(spec); }
@@ -388,7 +308,7 @@ async function renderHud(ctx, state = undefined, now = Date.now()) {
 }
 
 async function updateStatus(ctx, state, now = Date.now()) {
-  await ctx.status.set({ text: cleanTitle(humanDeadlineSummary(ctx, state, now), 118), tone: state.offline ? "warning" : "info" });
+  await ctx.status.set({ text: cleanTitle(humanDeadlineSummary(ctx, state, now), 118), tone: "info" });
 }
 
 function sourceForKey(state, sourceKey) {
@@ -524,8 +444,6 @@ async function applyAlertAction(ctx, keys, action) {
       state.reminders.push({
         key: `${item.key}-s${count}`,
         sourceKey: item.sourceKey,
-        sourceKind: item.sourceKind,
-        sourceId: item.sourceId,
         dueAt: now + snoozeMinutes * MINUTE_MS,
         offsetMinutes: item.offsetMinutes,
         state: "pending",
@@ -617,18 +535,7 @@ async function reconcile(ctx) {
     await renderHud(ctx, state, now);
     await registerManageDeadlineCommand(ctx, state);
     await armHudRefresh(ctx);
-    await armCalendarSync(ctx, state);
   });
-}
-
-async function armCalendarSync(ctx, state) {
-  await ctx.schedule.cancel(CALENDAR_SYNC_SCHEDULE_ID);
-  if (!state.events.length) return;
-  await ctx.schedule.every(CALENDAR_SYNC_SCHEDULE_ID, CALENDAR_SYNC_INTERVAL_MS, () => synchronizeTrackedEvents(ctx));
-}
-
-function commandIdForCalendar(prefix, provider, calendarId) {
-  return `${prefix}-${provider}-${hashString(calendarId)}`;
 }
 
 async function registerCommand(ctx, meta, handler) {
@@ -642,7 +549,6 @@ async function unregisterCommand(ctx, id) {
   const runtime = runtimeFor(ctx);
   try { await ctx.commands.unregister(id); } catch {}
   runtime.commands.delete(id);
-  runtime.selections.delete(id);
 }
 
 async function registerStaticCommands(ctx) {
@@ -662,13 +568,6 @@ async function registerStaticCommands(ctx) {
     },
   }, (values) => createManualDeadline(ctx, values ?? {}));
   await registerCommand(ctx, { id: "list-deadlines", title: "$t:command.list.title", description: "$t:command.list.description", icon: "bell" }, () => speakDeadlines(ctx));
-  await registerCommand(ctx, { id: "refresh-calendars", title: "$t:command.refreshCalendars.title", description: "$t:command.refreshCalendars.description", icon: "timer" }, () => refreshCalendarChoices(ctx));
-  await registerCommand(ctx, { id: "check-connections", title: "$t:command.checkConnections.title", description: "$t:command.checkConnections.description", icon: "bell" }, () => checkConnectionStatus(ctx));
-  await registerCommand(ctx, { id: "sync-calendar-events", title: "$t:command.sync.title", description: "$t:command.sync.description", icon: "timer" }, () => synchronizeTrackedEvents(ctx));
-  await registerCommand(ctx, { id: "connect-google", title: "$t:command.connectGoogle.title", description: "$t:command.connectGoogle.description", icon: "bell" }, () => connectProvider(ctx, "google"));
-  await registerCommand(ctx, { id: "connect-outlook", title: "$t:command.connectOutlook.title", description: "$t:command.connectOutlook.description", icon: "bell" }, () => connectProvider(ctx, "outlook"));
-  await registerCommand(ctx, { id: "disconnect-google", title: "$t:command.disconnectGoogle.title", description: "$t:command.disconnectGoogle.description", icon: "bell" }, () => disconnectProvider(ctx, "google"));
-  await registerCommand(ctx, { id: "disconnect-outlook", title: "$t:command.disconnectOutlook.title", description: "$t:command.disconnectOutlook.description", icon: "bell" }, () => disconnectProvider(ctx, "outlook"));
   await registerCommand(ctx, { id: "snooze-latest-alert", title: "$t:command.snooze.title", description: "$t:command.snooze.description", icon: "bell" }, () => actOnLatestAlert(ctx, "snooze"));
   await registerCommand(ctx, { id: "dismiss-latest-alert", title: "$t:command.dismiss.title", description: "$t:command.dismiss.description", icon: "bell" }, () => actOnLatestAlert(ctx, "dismiss"));
   await registerCommand(ctx, { id: "retry-alerts", title: "$t:command.retry.title", description: "$t:command.retry.description", icon: "bell" }, () => retryFailedAlerts(ctx));
@@ -748,7 +647,6 @@ async function manageManualDeadline(ctx, values) {
     await registerManageDeadlineCommand(ctx, state);
     await armNextReminder(ctx, state, now);
     await renderHud(ctx, state, now);
-    await armCalendarSync(ctx, state);
   });
 }
 
@@ -758,220 +656,6 @@ async function speakDeadlines(ctx) {
   if (!sources.length) return ctx.pet.speak(ctx.t("speech.none"));
   const details = sources.map((item) => `${shortTitle(item.title, 70)} — ${formatLocal(ctx, item.dueAt)}`).join("; ");
   await ctx.pet.speak(ctx.t("speech.list", { details, count: sources.length }));
-}
-
-async function connectProvider(ctx, provider) {
-  try {
-    const result = await ctx.calendar.connect(provider);
-    await ctx.pet.speak(ctx.t(`speech.connection.${result.state}`, { provider: ctx.t(`provider.${provider}`) }));
-  } catch {
-    await ctx.pet.speak(ctx.t("speech.connection.unavailable", { provider: ctx.t(`provider.${provider}`) }));
-  }
-}
-
-async function checkConnectionStatus(ctx) {
-  return exclusive(ctx, async () => {
-    const state = await readState(ctx);
-    for (const provider of PROVIDERS) {
-      try {
-        state.connectionStates[provider] = (await ctx.calendar.status(provider)).state;
-      } catch {
-        state.connectionStates[provider] = "unavailable";
-      }
-    }
-    state.offline = Object.values(state.connectionStates).some((status) => status === "offline");
-    await writeState(ctx, state);
-    await renderHud(ctx, state);
-    await ctx.pet.speak(ctx.t("speech.connectionStatus", {
-      google: ctx.t(`connection.${state.connectionStates.google}`),
-      outlook: ctx.t(`connection.${state.connectionStates.outlook}`),
-    }));
-  });
-}
-
-async function disconnectProvider(ctx, provider) {
-  try {
-    await ctx.calendar.disconnect(provider);
-  } catch {
-    await ctx.pet.speak(ctx.t("speech.disconnectFailed", { provider: ctx.t(`provider.${provider}`) }));
-    return;
-  }
-  return exclusive(ctx, async () => {
-    const state = await readState(ctx);
-    state.events = state.events.filter((event) => event.provider !== provider);
-    state.calendars = state.calendars.filter((calendar) => calendar.provider !== provider);
-    state.connectionStates[provider] = "not_connected";
-    state.offline = false;
-    planReminders(state, Date.now(), reminderOffsets(await getConfig(ctx)));
-    await writeState(ctx, state);
-    await syncCalendarCommands(ctx, state.calendars);
-    await armNextReminder(ctx, state);
-    await armCalendarSync(ctx, state);
-    await renderHud(ctx, state);
-    await ctx.pet.speak(ctx.t("speech.disconnected", { provider: ctx.t(`provider.${provider}`) }));
-  });
-}
-
-async function refreshCalendarChoices(ctx) {
-  return exclusive(ctx, async () => {
-    const state = await readState(ctx);
-    let failed = false;
-    for (const provider of PROVIDERS) {
-      try {
-        const status = await ctx.calendar.status(provider);
-        state.connectionStates[provider] = status.state;
-        if (status.state === "connected") {
-          const result = await ctx.calendar.listCalendars(provider);
-          state.calendars = state.calendars.filter((calendar) => calendar.provider !== provider);
-          state.calendars.push(...result.calendars.map((calendar) => ({ ...calendar, provider })));
-        } else if (status.state === "not_connected") {
-          state.calendars = state.calendars.filter((calendar) => calendar.provider !== provider);
-        }
-      } catch {
-        failed = true;
-        state.connectionStates[provider] = "offline";
-      }
-    }
-    state.offline = failed || Object.values(state.connectionStates).some((status) => status === "offline");
-    await writeState(ctx, state);
-    await syncCalendarCommands(ctx, state.calendars);
-    await renderHud(ctx, state);
-    await ctx.pet.speak(ctx.t(failed ? "speech.calendarOffline" : "speech.calendarsUpdated", { count: state.calendars.length }));
-  });
-}
-
-async function syncCalendarCommands(ctx, calendars) {
-  const runtime = runtimeFor(ctx);
-  for (const id of [...runtime.commands]) {
-    if (id.startsWith("browse-calendar-") || id.startsWith("track-events-")) await unregisterCommand(ctx, id);
-  }
-  for (const calendar of calendars) {
-    const id = commandIdForCalendar("browse-calendar", calendar.provider, calendar.id);
-    await registerCommand(ctx, {
-      id,
-      title: "$t:command.browseCalendar.title",
-      description: "$t:command.browseCalendar.description",
-      icon: "bell",
-    }, () => browseCalendar(ctx, calendar));
-  }
-}
-
-async function browseCalendar(ctx, calendar) {
-  try {
-    const now = Date.now();
-    const result = await ctx.calendar.listEvents(calendar.provider, calendar.id, {
-      from: new Date(now - 5 * MINUTE_MS).toISOString(),
-      to: new Date(now + CALENDARS_RANGE_DAYS * DAY_MS).toISOString(),
-      ...(calendar.timeZone ? { calendarTimeZone: calendar.timeZone } : {}),
-    });
-    const state = await readState(ctx);
-    const tracked = new Set(state.events.map((item) => `${item.provider}\u0000${item.calendarId}\u0000${item.eventId}`));
-    const choices = result.events
-      .filter((event) => event.status === "confirmed" && eventDueAt(event) > now && eventEndAt(event) > now)
-      .filter((event) => !tracked.has(`${calendar.provider}\u0000${calendar.id}\u0000${event.id}`))
-      .slice(0, MAX_EVENT_CHOICES);
-    if (!choices.length) {
-      await ctx.pet.speak(ctx.t("speech.noEvents", { calendar: calendar.name }));
-      return;
-    }
-    const commandId = commandIdForCalendar("track-events", calendar.provider, calendar.id);
-    const options = choices.map((event, index) => ({
-      value: String(index),
-      label: `${shortTitle(event.title, 80)} — ${formatLocal(ctx, eventDueAt(event))}`.slice(0, 180),
-    }));
-    runtimeFor(ctx).selections.set(commandId, choices);
-    await registerCommand(ctx, {
-      id: commandId,
-      title: "$t:command.trackEvents.title",
-      description: "$t:command.trackEvents.description",
-      icon: "bell",
-      form: { submitLabel: "$t:command.trackEvents.submit", fields: [{ id: "eventIndex", type: "select", label: "$t:form.event", options }] },
-    }, (values) => trackSelectedEvent(ctx, calendar, Number(values?.eventIndex)));
-    await ctx.pet.speak(ctx.t("speech.eventsReady", { count: choices.length, calendar: calendar.name }));
-  } catch {
-    const state = await readState(ctx);
-    state.offline = true;
-    state.connectionStates[calendar.provider] = "offline";
-    await writeState(ctx, state);
-    await renderHud(ctx, state);
-    await ctx.pet.speak(ctx.t("speech.calendarOffline"));
-  }
-}
-
-async function trackSelectedEvent(ctx, calendar, index) {
-  const commandId = commandIdForCalendar("track-events", calendar.provider, calendar.id);
-  const choice = runtimeFor(ctx).selections.get(commandId)?.[index];
-  if (!choice) return;
-  return exclusive(ctx, async () => {
-    const state = await readState(ctx);
-    const event = normalizeCalendarEvent(choice);
-    if (!event || state.events.length >= MAX_TRACKED_EVENTS) {
-      await ctx.pet.speak(ctx.t("speech.tooManyEvents", { count: MAX_TRACKED_EVENTS }));
-      return;
-    }
-    if (state.events.some((item) => item.provider === calendar.provider && item.calendarId === calendar.id && item.eventId === event.id)) return;
-    const now = Date.now();
-    state.events.push({ provider: calendar.provider, calendarId: calendar.id, eventId: event.id, ...(calendar.timeZone ? { calendarTimeZone: calendar.timeZone } : {}), trackedAt: now, event });
-    state.offline = false;
-    planReminders(state, now, reminderOffsets(await getConfig(ctx)));
-    await writeState(ctx, state);
-    await armNextReminder(ctx, state, now);
-    await armCalendarSync(ctx, state);
-    await renderHud(ctx, state, now);
-    await ctx.pet.speak(ctx.t("speech.eventTracked", { title: event.title, relative: relativeDeadline(ctx, eventDueAt(event), now) }));
-  });
-}
-
-async function synchronizeTrackedEvents(ctx) {
-  return exclusive(ctx, async () => {
-    const state = await readState(ctx);
-    if (!state.events.length) {
-      await ctx.pet.speak(ctx.t("speech.noTrackedEvents"));
-      return false;
-    }
-    const nextEvents = [];
-    let failed = false;
-    for (const provider of PROVIDERS) {
-      const providerEvents = state.events.filter((item) => item.provider === provider);
-      if (!providerEvents.length) continue;
-      let status;
-      try { status = await ctx.calendar.status(provider); }
-      catch { status = { provider, state: "offline" }; }
-      state.connectionStates[provider] = status.state;
-      if (status.state !== "connected") {
-        if (status.state === "offline") failed = true;
-        nextEvents.push(...providerEvents);
-        continue;
-      }
-      for (const tracked of providerEvents) {
-        try {
-          const calendarTimeZone = provider === "google" ? tracked.calendarTimeZone : undefined;
-          const fetched = await ctx.calendar.getEvent(provider, tracked.calendarId, tracked.eventId, calendarTimeZone);
-          if (!fetched || fetched.status === "cancelled") {
-            await ctx.pet.speak(ctx.t("speech.eventRemoved", { title: tracked.event.title }));
-            continue;
-          }
-          const event = normalizeCalendarEvent(fetched, tracked.trackedAt);
-          if (!event) continue;
-          nextEvents.push({ ...tracked, event });
-        } catch {
-          failed = true;
-          nextEvents.push(tracked);
-        }
-      }
-    }
-    state.events = nextEvents.slice(0, MAX_TRACKED_EVENTS);
-    state.offline = failed || Object.values(state.connectionStates).some((status) => status === "offline");
-    const now = Date.now();
-    planReminders(state, now, reminderOffsets(await getConfig(ctx)));
-    await writeState(ctx, state);
-    await armNextReminder(ctx, state, now);
-    await armCalendarSync(ctx, state);
-    await renderHud(ctx, state, now);
-    if (failed) await ctx.pet.speak(ctx.t("speech.calendarOffline"));
-    else await ctx.pet.speak(ctx.t("speech.syncComplete", { count: state.events.length }));
-    return !failed;
-  });
 }
 
 async function handleConfigChange(ctx) {
@@ -986,18 +670,6 @@ async function handleConfigChange(ctx) {
 
 function addLifecycleSubscriptions(ctx) {
   const runtime = runtimeFor(ctx);
-  runtime.subscriptions.push(ctx.events.on("online", () => { void refreshCalendarChoices(ctx); void synchronizeTrackedEvents(ctx); }));
-  runtime.subscriptions.push(ctx.events.on("offline", () => {
-    void exclusive(ctx, async () => {
-      const state = await readState(ctx);
-      state.offline = true;
-      state.connectionStates.google = state.connectionStates.google === "connected" ? "offline" : state.connectionStates.google;
-      state.connectionStates.outlook = state.connectionStates.outlook === "connected" ? "offline" : state.connectionStates.outlook;
-      await writeState(ctx, state);
-      await renderHud(ctx, state);
-    });
-  }));
-  runtime.subscriptions.push(ctx.events.on("screen:unlocked", () => { void refreshCalendarChoices(ctx); void synchronizeTrackedEvents(ctx); }));
   runtime.subscriptions.push(ctx.config.onChange(() => handleConfigChange(ctx)));
 }
 
@@ -1008,7 +680,7 @@ export async function stopContext(ctx) {
   for (const unsubscribe of runtime.subscriptions.splice(0)) {
     try { unsubscribe(); } catch {}
   }
-  await Promise.all([REMINDER_SCHEDULE_ID, HUD_REFRESH_SCHEDULE_ID, CALENDAR_SYNC_SCHEDULE_ID].map(async (id) => {
+  await Promise.all([REMINDER_SCHEDULE_ID, HUD_REFRESH_SCHEDULE_ID].map(async (id) => {
     try { await ctx.schedule.cancel(id); } catch {}
   }));
   for (const id of [...runtime.commands]) await unregisterCommand(ctx, id);
@@ -1032,27 +704,10 @@ export function register(OpenPetsPlugin) {
       await registerStaticCommands(ctx);
       addLifecycleSubscriptions(ctx);
       await reconcile(ctx);
-      const state = await readState(ctx);
-      await syncCalendarCommands(ctx, state.calendars);
-      if (state.events.length) void synchronizeTrackedEvents(ctx);
       await deliverDue(ctx);
     },
     async stop() {
       await Promise.all([...activeContexts].map((ctx) => stopContext(ctx)));
     },
   });
-}
-
-export {
-  refreshCalendarChoices,
-  synchronizeTrackedEvents,
-};
-
-function hashString(value) {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash.toString(36);
 }

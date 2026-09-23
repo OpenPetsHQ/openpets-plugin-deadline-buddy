@@ -16,8 +16,6 @@
     "schedule",
     "storage",
     "status",
-    "calendar:connect",
-    "events",
     "audio",
     "notify"
   ],

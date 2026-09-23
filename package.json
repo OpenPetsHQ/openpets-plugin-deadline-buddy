@@ -1,7 +1,7 @@
 {
   "name": "openpets-plugin-deadline-buddy",
   "version": "1.0.0",
-  "description": "Manual deadlines and selective read-only Google Calendar and Outlook event tracking for OpenPets.",
+  "description": "Manual deadlines, reminders, and a pinned pet HUD for OpenPets.",
   "type": "module",
   "files": [
     "index.js",
