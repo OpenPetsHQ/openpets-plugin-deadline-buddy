@@ -342,6 +342,16 @@ function hudProgress(source, now = Date.now()) {
   return Math.max(0, Math.min(100, Math.round(((now - source.createdAt) / span) * 100)));
 }
 
+export function compactHudRelative(ctx, dueAt, now) {
+  const delta = dueAt - now;
+  if (delta <= 0) return ctx.t("hud.overdue");
+  const minutes = Math.max(1, Math.ceil(delta / MINUTE_MS));
+  if (minutes < 60) return ctx.t("hud.inMinutes", { count: minutes });
+  if (minutes < 48 * 60) return ctx.t("hud.inHours", { count: Math.ceil(minutes / 60) });
+  const days = Math.ceil(minutes / (24 * 60));
+  return ctx.t("hud.inDays", { count: days });
+}
+
 async function renderHud(ctx, state = undefined, now = Date.now()) {
   const current = state ?? await readState(ctx);
   const next = nearestDeadline(current, now);
@@ -354,14 +364,13 @@ async function renderHud(ctx, state = undefined, now = Date.now()) {
     await updateStatus(ctx, current, now);
     return;
   }
-  const relative = relativeDeadline(ctx, next.dueAt, now);
+  const relative = compactHudRelative(ctx, next.dueAt, now);
   const spec = {
-    text: ctx.t("hud.next", { title: shortTitle(next.title, 80), relative }),
     tone: current.offline ? "warning" : "info",
     pin: true,
     sticky: true,
     priority: "low",
-    hud: { items: [{ icon: "timer", value: hudProgress(next, now), label: relative, tone: current.offline ? "amber" : "blue" }] },
+    hud: { items: [{ icon: "timer", value: hudProgress(next, now), label: ctx.t("hud.next", { title: shortTitle(next.title, 30), relative }), tone: current.offline ? "amber" : "blue" }] },
   };
   if (runtime.hud) {
     try { await runtime.hud.update(spec); }

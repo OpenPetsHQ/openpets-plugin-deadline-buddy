@@ -11,6 +11,7 @@ import {
   MINUTE_MS,
   REMINDER_SCHEDULE_ID,
   cleanTitle,
+  compactHudRelative,
   deadlineSources,
   formatRemaining,
   localDateTimeToEpoch,
@@ -74,6 +75,13 @@ assert.equal(localDateTimeToEpoch("2026-02-30", "10:00", "UTC"), null);
 assert.equal(localDateTimeToEpoch("2026-02-01", "24:00", "UTC"), null);
 assert.equal(formatRemaining(now + 2 * MINUTE_MS, now), "2m");
 assert.equal(formatRemaining(now - 61 * MINUTE_MS, now), "2h ago");
+{
+  const h = makeHarness();
+  assert.equal(compactHudRelative(h.ctx, now - 1, now), "overdue");
+  assert.equal(compactHudRelative(h.ctx, now + 45 * MINUTE_MS, now), "in 45m");
+  assert.equal(compactHudRelative(h.ctx, now + 90 * MINUTE_MS, now), "in 2h");
+  assert.equal(compactHudRelative(h.ctx, now + 2 * DAY_MS, now), "in 2d");
+}
 
 const allDay = normalizeCalendarEvent({
   id: "all-day-1", calendarId: "work", title: "Conference", status: "confirmed", allDay: true,
@@ -115,7 +123,8 @@ assert.equal(normalizeCalendarEvent({ ...allDay, status: "cancelled" }), null);
   assert.equal(h.calls.schedules.get(REMINDER_SCHEDULE_ID)?.type, "at", "deadline alerts use an absolute schedule");
   const hud = h.calls.bubbles.find((bubble) => bubble.pinned);
   assert.ok(hud, "nearest deadline is rendered in a pinned host bubble");
-  assert.match(hud.spec.text, /Design review/);
+  assert.equal(hud.spec.text, undefined, "HUD descriptors do not mix body text with host-rendered HUD rows");
+  assert.match(hud.spec.hud.items[0].label, /^Design review · in \d+[mh]$/);
   assert.equal([...h.calls.commands.values()].some((item) => item.meta.placement === "top"), false);
 
   const manage = h.calls.commands.get("manage-deadline");
@@ -261,7 +270,7 @@ assert.equal(normalizeCalendarEvent({ ...allDay, status: "cancelled" }), null);
   let saved = h.calls.storage.get("deadline-buddy-state");
   assert.equal(saved.events[0].event.title, "Planning moved");
   assert.equal(saved.events[0].event.startAt, moved.startAt);
-  assert.match(h.calls.bubbles.find((bubble) => bubble.pinned).spec.text, /Planning moved/);
+  assert.match(h.calls.bubbles.find((bubble) => bubble.pinned).spec.hud.items[0].label, /Planning moved/);
 
   const originalGetEvent = h.ctx.calendar.getEvent;
   h.ctx.calendar.getEvent = async () => { throw new Error("offline"); };
@@ -276,6 +285,28 @@ assert.equal(normalizeCalendarEvent({ ...allDay, status: "cancelled" }), null);
   assert.equal(saved.events.length, 0, "cancellation/deletion removes the event and its reminders");
   assert.equal(h.calls.schedules.has(CALENDAR_SYNC_SCHEDULE_ID), false);
   assert.ok(h.calls.speak.some((text) => text.includes("cancelled or removed")));
+  h.expectNoErrors();
+  await h.stop();
+}
+
+// Project-wide callback serialization has a clear user message rather than
+// claiming this profile already has a pending connection.
+{
+  const h = makeHarness();
+  await h.start();
+  h.ctx.calendar.connect = async () => ({ state: "busy" });
+  await h.runCommand("connect-google");
+  assert.ok(h.calls.speak.some((text) => text.includes("Another OpenPets calendar connection is being verified")));
+  h.expectNoErrors();
+  await h.stop();
+}
+
+{
+  const h = makeHarness();
+  await h.start();
+  h.ctx.calendar.connect = async () => ({ state: "cancelled" });
+  await h.runCommand("connect-google");
+  assert.ok(h.calls.speak.some((text) => text.includes("The Google Calendar connection was cancelled")));
   h.expectNoErrors();
   await h.stop();
 }
