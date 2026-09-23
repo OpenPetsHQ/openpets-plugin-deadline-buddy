@@ -1,0 +1,64 @@
+{
+  "manifestVersion": 3,
+  "id": "openpets.deadline-buddy",
+  "name": "$t:plugin.name",
+  "description": "$t:plugin.description",
+  "version": "1.0.0",
+  "runtime": "javascript",
+  "icon": "timer",
+  "sdkVersion": "3.0.0",
+  "entry": "index.js",
+  "permissions": [
+    "pet:speak",
+    "pet:interact",
+    "pet:pin",
+    "commands",
+    "schedule",
+    "storage",
+    "status",
+    "audio",
+    "notify"
+  ],
+  "configSchema": {
+    "reminderOffsets": {
+      "type": "multiSelect",
+      "default": ["60", "15", "0"],
+      "label": "$t:config.reminderOffsets.label",
+      "description": "$t:config.reminderOffsets.description",
+      "options": [
+        { "value": "1440", "label": "$t:config.reminderOffsets.day" },
+        { "value": "60", "label": "$t:config.reminderOffsets.hour" },
+        { "value": "15", "label": "$t:config.reminderOffsets.quarter" },
+        { "value": "0", "label": "$t:config.reminderOffsets.due" }
+      ]
+    },
+    "snoozeMinutes": {
+      "type": "select",
+      "default": "5",
+      "label": "$t:config.snoozeMinutes.label",
+      "description": "$t:config.snoozeMinutes.description",
+      "options": [
+        { "value": "5", "label": "$t:config.snoozeMinutes.five" },
+        { "value": "10", "label": "$t:config.snoozeMinutes.ten" },
+        { "value": "15", "label": "$t:config.snoozeMinutes.fifteen" }
+      ]
+    },
+    "soundEnabled": {
+      "type": "boolean",
+      "default": true,
+      "label": "$t:config.soundEnabled.label",
+      "description": "$t:config.soundEnabled.description"
+    },
+    "customSound": {
+      "type": "sound",
+      "label": "$t:config.customSound.label",
+      "description": "$t:config.customSound.description"
+    },
+    "osNotification": {
+      "type": "boolean",
+      "default": true,
+      "label": "$t:config.osNotification.label",
+      "description": "$t:config.osNotification.description"
+    }
+  }
+}
