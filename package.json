@@ -3,6 +3,11 @@
   "version": "1.0.0",
   "description": "Manual deadlines and selective read-only Google Calendar and Outlook event tracking for OpenPets.",
   "type": "module",
+  "files": [
+    "index.js",
+    "locales/",
+    "openpets.plugin.json"
+  ],
   "scripts": {
     "test": "node test.js",
     "validate": "npx --yes @open-pets/cli plugin validate ."

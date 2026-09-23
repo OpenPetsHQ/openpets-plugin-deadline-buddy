@@ -110,6 +110,40 @@ The Google scopes are documented in [Google Calendar API authorization](https://
 Changing the HMAC secret changes every derived Composio user ID and makes
 existing local connections unreachable. Plan a migration before rotating it.
 
+## Test in OpenPets
+
+Requires OpenPets Desktop 4.0.0 with SDK v3 plugin support and the
+`calendar:connect` host capability from [OpenPets PR #217](https://github.com/OpenPetsHQ/openpets/pull/217),
+or a later release containing that capability, with Developer Mode enabled.
+Earlier builds and the currently published CLI do not recognize this manifest
+permission, so they cannot load or validate this version. The Composio broker
+is not needed to load the plugin or use manual deadlines, their HUD, and
+reminders; calendar sign-in is a separate feature that additionally requires a
+maintainer-configured broker.
+
+Clone the standalone repository and check out the feature branch:
+
+```sh
+git clone https://github.com/OpenPetsHQ/openpets-plugin-deadline-buddy.git
+cd openpets-plugin-deadline-buddy
+git fetch origin feat/deadline-buddy
+git switch --track origin/feat/deadline-buddy
+```
+
+In OpenPets, open **Plugins → Developer Mode → Load Folder** (shown in some
+builds as **Load unpacked plugin folder**) and select the cloned repository
+root, the folder containing `openpets.plugin.json`. Approve and enable Deadline
+Buddy if prompted. Under **Plugins → Deadline Buddy**, select **Add deadline…**,
+enter a title such as `Design review`, choose a date and time a few minutes in
+the future, and submit. Verify that the nearest deadline appears in the pinned
+pet HUD and that its reminder appears at the configured offset. For a quick
+reminder check, set the plugin's reminder offsets to **At the deadline** before
+creating the sample deadline.
+
+Calendar testing is separate. Google or Outlook sign-in needs the compatible
+host changes in PR #217 and the configured first-party Composio broker. Never
+enter a shared Composio API key in the plugin, its settings, or plugin storage.
+
 ## Development and tests
 
 ```sh
@@ -118,18 +152,14 @@ npm test
 npm run validate
 ```
 
-The tests use the OpenPets SDK v3 deterministic harness and mocked provider
+The tests use the published OpenPets SDK v3 deterministic harness and mocked provider
 operations. They cover manual deadline lifecycle, DST conversion, reminder
 recovery/retry bounds, snooze/dismiss, selected-event changes/cancellation,
 offline behavior, notification options, schedule cleanup, and menu placement.
+Until the host permission is released in the public CLI, run manifest validation
+with the CLI built from a compatible OpenPets checkout; the current published
+CLI intentionally rejects `calendar:connect`.
 
-To try the plugin from an OpenPets source checkout with the host connector:
-
-```sh
-OPENPETS_DEV_PLUGIN_PATHS=/absolute/path/to/openpets-plugin-deadline-buddy pnpm dev:desktop
-```
-
-Then enable Deadline Buddy in Developer Mode and use its submenu under
-**Plugins**. Composio OAuth and actual OS notifications still require a
-maintainer-configured broker, auth-config IDs, provider apps/consent setup, and
-manual testing on supported operating systems.
+Manual deadline testing does not require a local OpenPets source checkout.
+Real Google/Outlook OAuth and operating-system notification behavior still need
+manual validation on a configured host and supported operating system.
