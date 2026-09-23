@@ -8,7 +8,9 @@ host-rendered pinned pet HUD.
 ## Features
 
 - Add, list, rename, reschedule, complete, and delete manual deadlines.
-- Connect Google Calendar or Outlook through Composio-managed authorization.
+- Integrate selective, read-only Google Calendar or Outlook tracking when the
+  host connection is enabled; it is currently unavailable pending independent
+  OAuth identity verification.
 - Browse a calendar and select individual future events to track; it does not
   subscribe to every event by default.
 - Reconcile selected events for time changes, cancellations, or deletion every
@@ -37,23 +39,21 @@ OAuth data is stored in plugin storage or plugin-readable secrets.
 
 The desktop host stores an opaque per-local-profile identity using asynchronous
 OS safe storage. On Linux it fails closed if the selected keyring backend is
-plaintext or unavailable. This is a local identity, not an OpenPets account;
-it does not provide cross-device recovery. The Composio API key and HMAC secret
-exist only as server-side Worker secrets. Calendar Airmail's existing OAuth
-flow and plugin-scoped credentials are not used or modified.
+plaintext or unavailable. This identifies the local profile that initiated a
+request; it is not an OpenPets account, does not authenticate the person who
+completes OAuth, and does not provide cross-device recovery. Calendar Airmail's
+existing OAuth flow and plugin-scoped credentials are not used or modified.
 
-The broker uses Composio's deferred-auth callback with a host-mediated,
-single-use profile handoff. The callback URI is encrypted in the Worker-only
-D1 store; the broker returns a short-lived one-time ticket through the
-`openpets://calendar/verify` protocol. The desktop host redeems it with its
-OS-encrypted local-profile identity. The Worker calls Composio `complete_auth`
-with the attempt-specific owner and checks the exact account ID, owner,
-toolkit, auth config, private ownership, and ACTIVE status before recording
-the connection as verified. A browser return or ACTIVE status alone is never
-accepted. A single project-wide connection slot prevents callback mix-ups,
-and the connection flow fails closed until the verifier, D1 store, secrets,
-rate limits, and log redaction are configured. No live broker or OAuth setup
-has been tested in this repository.
+Calendar Connect, connection status, and calendar reads are deliberately
+disabled by host PR #217. Composio's Connect Link/callback returns a
+`session_uri`, and `complete_auth` accepts the application-supplied owner ID;
+neither independently verifies the person who completed provider sign-in.
+Matching a connected account to that owner proves only application-level
+association, not the browser user's identity. The host therefore rejects
+connection activation even if an account is ACTIVE or the one-time
+local-profile handoff succeeds. Manual deadlines, their HUD, and reminders
+remain available. No live broker deployment or Google/Outlook OAuth has been
+tested.
 
 The backend allowlists Google and Microsoft calendar reads, returns a minimized
 event shape, and checks the provider, toolkit, auth configuration, and private
@@ -74,7 +74,8 @@ current broker origin and D1 database ID are placeholders; do not enable
 connection verification or deploy until maintainers provision the real route,
 database, read-only auth configs, and rate-limit namespaces.
 
-The Worker requires these server-side secrets/variables:
+The Worker will require these server-side secrets/variables after maintainers
+provision a reviewed identity proof and authorize a staging rollout:
 
 - `COMPOSIO_API_KEY` — scoped to the Composio proxy execution and managed
   connected-account operations used by this service.
@@ -84,8 +85,11 @@ The Worker requires these server-side secrets/variables:
   base64url, used to encrypt the deferred callback URI in D1.
 - `COMPOSIO_GOOGLE_AUTH_CONFIG_ID` and `COMPOSIO_OUTLOOK_AUTH_CONFIG_ID` —
   managed auth configs set up with the read-only scopes below.
-- `COMPOSIO_CALLBACK_VERIFIER_ENABLED=1` — enable only after the callback route,
-  D1 migration, secrets, rate limits, and query-string redaction are verified.
+- The deployed Worker currently has no enable flag: its Connect Link,
+  callback, status, and read routes are hard-disabled. Do not remove that guard
+  or enable OAuth until the independent identity blocker above is resolved and
+  the callback route, D1 migration, secrets, rate limits, and query-string
+  redaction have passed security review.
 
 In the OpenPets host repository, apply
 `apps/calendar-broker/migrations/0001_calendar_connect_attempts.sql` before
@@ -118,8 +122,9 @@ or a later release containing that capability, with Developer Mode enabled.
 Earlier builds and the currently published CLI do not recognize this manifest
 permission, so they cannot load or validate this version. The Composio broker
 is not needed to load the plugin or use manual deadlines, their HUD, and
-reminders; calendar sign-in is a separate feature that additionally requires a
-maintainer-configured broker.
+reminders. Google/Outlook sign-in still shows unavailable until OpenPets can
+independently verify the identity of the person completing OAuth; PR #217
+intentionally keeps it disabled.
 
 Clone the standalone repository and check out the feature branch:
 
@@ -140,9 +145,11 @@ pet HUD and that its reminder appears at the configured offset. For a quick
 reminder check, set the plugin's reminder offsets to **At the deadline** before
 creating the sample deadline.
 
-Calendar testing is separate. Google or Outlook sign-in needs the compatible
-host changes in PR #217 and the configured first-party Composio broker. Never
-enter a shared Composio API key in the plugin, its settings, or plugin storage.
+Calendar testing is separate and cannot currently proceed: Google or Outlook
+sign-in needs the compatible host, a maintainer-configured first-party Composio
+broker, and a security-reviewed identity-verification mechanism that Composio's
+current owner-ID callback does not provide. Never enter a shared Composio API
+key in the plugin, its settings, or plugin storage.
 
 ## Development and tests
 

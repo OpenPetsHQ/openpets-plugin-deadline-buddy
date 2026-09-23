@@ -125,7 +125,7 @@ export function normalizeState(value) {
   const connectionStates = {};
   for (const provider of ["google", "outlook"]) {
     const status = isRecord(source.connectionStates) ? source.connectionStates[provider] : undefined;
-    connectionStates[provider] = ["not_connected", "pending", "connected", "reauth_required", "offline"].includes(status) ? status : "not_connected";
+    connectionStates[provider] = ["not_connected", "pending", "connected", "reauth_required", "offline", "unavailable"].includes(status) ? status : "not_connected";
   }
   return {
     version: 1,
@@ -765,12 +765,7 @@ async function connectProvider(ctx, provider) {
     const result = await ctx.calendar.connect(provider);
     await ctx.pet.speak(ctx.t(`speech.connection.${result.state}`, { provider: ctx.t(`provider.${provider}`) }));
   } catch {
-    const state = await readState(ctx);
-    state.offline = true;
-    state.connectionStates[provider] = "offline";
-    await writeState(ctx, state);
-    await renderHud(ctx, state);
-    await ctx.pet.speak(ctx.t("speech.connection.error", { provider: ctx.t(`provider.${provider}`) }));
+    await ctx.pet.speak(ctx.t("speech.connection.unavailable", { provider: ctx.t(`provider.${provider}`) }));
   }
 }
 
@@ -781,7 +776,7 @@ async function checkConnectionStatus(ctx) {
       try {
         state.connectionStates[provider] = (await ctx.calendar.status(provider)).state;
       } catch {
-        state.connectionStates[provider] = "offline";
+        state.connectionStates[provider] = "unavailable";
       }
     }
     state.offline = Object.values(state.connectionStates).some((status) => status === "offline");

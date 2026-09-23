@@ -351,4 +351,29 @@ assert.equal(normalizeCalendarEvent({ ...allDay, status: "cancelled" }), null);
   await h.stop();
 }
 
+// Calendar auth/status failures do not mark local deadlines offline or alter
+// the manual reminder schedule; the UI points users to the host connection hub.
+{
+  const h = makeHarness({ reminderOffsets: ["0"] });
+  await h.start();
+  const calendar = attachCalendarMock(h);
+  calendar.connect = async () => { throw new Error("OAuth identity verification unavailable"); };
+  calendar.status = async () => { throw new Error("Calendar status is unavailable"); };
+
+  await h.runCommand("connect-google");
+  await h.runCommand("check-connections");
+  const state = h.calls.storage.get("deadline-buddy-state");
+  assert.equal(state.offline, false);
+  assert.equal(state.connectionStates.google, "unavailable");
+  assert.ok(h.calls.speak.some((text) => text.includes("Integrations → Connected Apps") && text.includes("Manual deadlines remain available")));
+
+  await addDeadline(h, "Manual deadline still works", 20);
+  const afterManualCreate = h.calls.storage.get("deadline-buddy-state");
+  assert.equal(afterManualCreate.offline, false);
+  assert.equal(afterManualCreate.manual.length, 1);
+  assert.equal(afterManualCreate.reminders.length, 1);
+  h.expectNoErrors();
+  await h.stop();
+}
+
 console.log("openpets.deadline-buddy: all checks passed.");
